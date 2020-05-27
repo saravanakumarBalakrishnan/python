@@ -1,0 +1,101 @@
+import sqlite3
+import os.path
+import time
+db_file = '/home/tebot/TebotBundle/database/cardcalib.db'
+def table_create(table_name):
+    conn = sqlite3.connect(db_file)
+    try:
+        conn.execute('''CREATE TABLE servo_calibration
+             (ID INT PRIMARY KEY     NOT NULL,
+             cardname           TEXT    NOT NULL,
+             portnumber            TEXT     NOT NULL,
+             minvalue                  TEXT     NOT NULL,
+             maxvalue                  TEXT     NOT NULL
+             );''')
+    except Exception as e:
+        print(e)
+    conn.commit()
+    conn.close()
+    print("table created succesfully")
+    return "table successfully"
+
+def addrow(id,card_name, port_number, min_calib_value,max_calib_value):
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO servo_calibration ( ID,cardname, portnumber, minvalue,maxvalue ) VALUES ( ?,?,?, ?, ? )",
+                  (id,card_name, port_number, min_calib_value,max_calib_value))
+    except Exception as e:
+        print(e)
+        return e
+    conn.commit()
+    conn.close()
+    return "Values Added"
+@app.route('/TebotAPI/returnAll')
+def returnAll():
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute("SELECT * FROM servo_calibration")
+    rows = c.fetchall()
+    # dict = {'records':rows}
+    dict = {}
+    dict_new = {}
+    item = 'records'
+    dict['records'] = rows
+    #dict_new['records'] =
+    # for row in rows:
+    #   dict[row[0]] = (row[1],row[2],row[3])
+    conn.close()
+    #print (dict)
+    return jsonify(dict)
+
+def updaterow(card_name, port_number, min_calib_value,max_calib_value):
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE servo_calibration SET portnumber=?,minvalue=?,maxvalue=? WHERE cardname=?", (port_number, min_calib_value, max_calib_value, card_name))
+    except Exception as  e:
+        return e
+    conn.commit()
+    conn.close()
+    return "Values updated"
+@app.route('/TebotAPI/query/<cardname>')
+def query_calibvalue(card_name):
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute("SELECT * FROM servo_calibration where cardname=?", (card_name,))
+    rows = c.fetchall()
+    # dict = {'x':rows[0][1],'y':rows[0][2],'z':rows[0][3]}
+    conn.close()
+    if rows == None or rows == []:
+        return str(0),str(0),str(0)
+    else:
+        return rows[0][2], rows[0][3], rows[0][4]
+print(table_create('servo_calibration'))
+time.sleep(2)
+print(addrow('1','GetCard1','S1','99','45'))
+time.sleep(2)
+print(addrow('2','GetCard2','S1','10','25'))
+time.sleep(2)
+print(addrow('3','GetCard3','S1','0','5'))
+time.sleep(2)
+print(addrow('4','NewInsert','S2','90','45'))
+time.sleep(2)
+print(addrow('5','NewRemove','S2','70','0'))
+time.sleep(2)
+print(addrow('6','Swipe','S3','0','95'))
+time.sleep(2)
+print(addrow('7','GetNFC1','S4','99','45'))
+time.sleep(2)
+print(addrow('8','GetNFC2','S4','99','45'))
+time.sleep(2)
+
+#print(updaterow('GetCard1','1','41.5','0'))
+#portnumber,minval,maxvalue = query_calibvalue('Swipe')
+#print(portnumber,minval,maxvalue)
+#print(queryxyz('GetCard1'))
+
+print(str(returnAll()))
+time.sleep(2)
+
+print("Configuration Done")
