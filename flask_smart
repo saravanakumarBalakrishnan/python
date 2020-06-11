@@ -1,0 +1,1664 @@
+#!/usr/bin/python
+
+#from Adafruit_PWM_Servo_Driver import PWM
+import datetime
+import os, fnmatch
+import cv2
+import numpy as np
+import sys
+import socket
+import time
+import struct
+from flask import Flask,request, send_file, url_for,jsonify,redirect, flash,  abort,app,make_response
+from decimal import Decimal
+from flask import session
+import pickle
+#import urllib2
+import threading
+import RPi.GPIO as gpio
+import signal
+import logging
+import sqlite3
+import base64
+app = Flask(__name__)
+
+gpio.setmode(gpio.BCM) #selecting the pin numbers are Broadcom. Refer GPIO numbers in the Pinout diagram, not the Pin numbers.
+DEBUG = 1
+
+switch1 = 10
+switch2 = 9
+switch3 = 6
+gpio.setup(switch1, gpio.OUT)
+gpio.setup(switch2, gpio.OUT)
+gpio.setup(switch3, gpio.OUT)
+#Turning off the GPIO's to initialize
+gpio.output(switch1,gpio.LOW)
+gpio.output(switch2,gpio.LOW)
+gpio.output(switch3,gpio.HIGH)
+
+#Initializing the MCP3008 pins for SPI Communication -- ADC
+SPICLK = 24
+SPIMISO = 11
+SPIMOSI = 8
+SPICS = 5 #Pathched this on brd
+
+# set up the SPI interface pins
+gpio.setup(SPIMOSI, gpio.OUT)
+gpio.setup(SPIMISO, gpio.IN)
+gpio.setup(SPICLK, gpio.OUT)
+gpio.setup(SPICS, gpio.OUT)
+
+os.system ("cd")
+os.chdir ("/home/pi/PiBits/ServoBlaster/user")
+os.system("sudo ./servod --pcm")
+
+
+
+#------------------------------------------------------------------------------#
+#the following function is to process the captured keyboard interrupt:
+def signal_handler(signal, frame):
+    print ("Exiting the program since you have pressed Ctrl+C")
+    #os.system("sudo killall servod") #kills the servo blaster process
+    gpio.cleanup() # this ensures a clean exit
+    sys.exit(0) #exits the program
+
+#To handle the keyboard interrupt
+signal.signal(signal.SIGINT,signal_handler)
+
+
+# ===========================================================================
+# Example Code
+# ===========================================================================
+
+# Initialise the PWM device using the default address
+#pwm = PWM(0x40)
+# Note if you'd like more debug output you can instead run:
+#pwm = PWM(0x40, debug=True)
+
+#servoMin = 150  # Min pulse length out of 4096
+#servoMax = 650  # Max pulse length out of 4096
+imageDirectory = '/home/pi/Image/'
+
+#########################################Secure Implementation #############################
+userid=0
+session_flag=None
+user_login_counter=3
+count =0
+
+#db_file = '/home/tebot/TebotBundle/database/coordinates.db'
+db_file = '/home/pi/TebotBundle/database/coordinates.db'
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)
+formatter = logging.Formatter('%(asctime)s : %(levelname)-8s : %(message)s')
+
+
+file_handler = logging.FileHandler('/home/pi/error_log.log')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+
+################Tebot Version###################
+version_Dict = {}
+import pkg_resources
+version_Dict["Tebot_Arm_support"] = "NIL"
+version_Dict["Tebot_Firmware_version"] = "SmartMeter_CommandCenter_secure_V1"
+version_Dict["Tebot_UI_version"] = "testversion"
+version_Dict["Tebot_Servo_Driver_Type"] = "GPIO_ServoBlaster"
+version_Dict["CustomerName_RnD"] = "RnD"
+version_Dict["Location"] = "KNC,Chennai"
+version_Dict["Author"] = "saravana"
+version_Dict["Last Change Date"] = "11-06-2020 "
+version_Dict["Comments"]  = "POST method migrations "
+os_file = open("/etc/os-release", "r")  ###line number 1,3
+line = os_file.readlines()
+version_Dict["Linux_name_type"] = line[1]
+version_Dict["Linux_os_version"] = line[3]
+os_file.close
+version_Dict["Python_version"] = sys.version
+version_Dict["Opencv_version"] = cv2.__version__
+version_Dict["Flask_server_version"] = pkg_resources.working_set.by_key['flask'].version
+#version_Dict["Tesseract_version"] = pkg_resources.working_set.by_key['pytesseract'].version
+rpi_version_file = open("/proc/device-tree/model")
+version_line = rpi_version_file.readline()
+version_Dict["Raspberry Pi Model"] = version_line
+
+########################################################
+@app.route('/Tebot-version', methods=['GET'])
+def Tebot_version_method():
+    #import pkg_resources
+    global version_Dict
+    return jsonify(version_Dict)
+
+
+'''@app.before_request
+def before_request():
+    session.permanent = True
+    permanent_session_lifetime = datetime.timedelta(minutes=60)
+    session.modified = True'''
+
+def query_keyname():
+    pickle_file_key = open("/home/pi/TebotBundle/dict.pickle_new", "rb")
+    enc_key = pickle.load(pickle_file_key)
+    return enc_key[1]
+
+
+
+def query_key(name):
+    global user_login_counter
+    if (isinstance(name, str)) == True and user_login_counter :
+        try:
+            query_name = name
+            conn = sqlite3.connect(db_file)
+            c = conn.cursor()
+            c.execute("SELECT * FROM Tebotuser where username=?", (query_name,))
+            rows = c.fetchall()
+            # dict = {'x':rows[0][1],'y':rows[0][2],'z':rows[0][3]}
+            conn.close()
+            # return jsonify(dict)
+            if rows == None or rows == []:
+                return  str(0)
+            else:
+                return rows[0][2]
+
+        except sqlite3.Error as error:
+             return  "no row availble"
+    elif not user_login_counter:
+        return "DB locked due to multiple wrong attempts!, Restart the controller after 10min"
+    else:
+        return "Input must be string"
+
+
+########### - User-Registeration -##########################
+
+@app.route('/user-register', methods=['POST'])
+def user_register():
+    user_data = request.get_json()
+    global userid
+    #request_type = user_data['request_type']
+    username = user_data['username']
+    password = user_data['password']
+
+    userid = userid + 1
+
+    keyfile_name = query_keyname()
+
+    db_stored_key = query_key(keyfile_name)
+
+    input_string = username + password + db_stored_key
+
+
+    encoding_string = input_string.encode()
+    encoded_string = base64.b64encode(encoding_string)
+
+    conn = sqlite3.connect(db_file)
+
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO Tebotuser ( ID,username , keyfile ) VALUES ( ?, ?, ? )",
+                  (userid,username, encoded_string))
+    except:
+        print("exception fired")
+        return "Check if the name entered is unique"
+    conn.commit()
+    conn.close()
+    print("registeration completed")
+    return "registeration process " #JUST check return respose over here
+
+
+
+
+
+
+@app.after_request
+def after_request_func(response):
+    #resp = make_response()
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    #response.headers['Content-Security-Policy'] = "default-src 'self'"
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    response.headers['server'] = 'TebotServer'
+    return response
+
+
+
+
+############-- User -Login -#################
+
+@app.route('/user-login', methods=['POST'])
+def user_login():
+    global session_flag,user_login_counter
+    login_username = request.form['username'] 	#FORM DATA
+    login_password = request.form['password']
+    validation = user_validation(login_username, login_password)
+
+    if validation == True and user_login_counter:
+        print("session storage")
+        session_flag =True
+        session['logged_in'] = True
+        session['username'] = request.form['username']
+        session['password'] = request.form['password']
+        user_login_counter=3
+        #session.permanent = True
+        print(" User attempt count ", user_login_counter)
+        print(session['logged_in'])
+    elif not validation  and user_login_counter:
+        user_login_counter -=1
+        print("invalid user detail : User attempt count ",user_login_counter)
+        return "Please Enter Correct User Credentials"
+    else:
+        print("user counter expired")
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    return home()
+
+def user_validation(input_username , input_password):
+    global  session_flag,user_login_counter
+    keyfile_name = query_keyname()
+    db_stored_key = query_key(keyfile_name)
+    string = input_username + input_password + db_stored_key
+    encoding_string = string.encode()
+    encoded_input_string = base64.b64encode(encoding_string)
+    #print("final validation key",encoded_input_string)
+    user_input_key = query_key(input_username)
+    if user_input_key == encoded_input_string:
+        global session_flag
+        session_flag == True
+        print("User login successfull")
+        user_login_counter =3
+        print(session_flag)
+        return True
+    else:
+        print("invalid user")
+        return False
+
+def get_session_user_details():
+    global  session_flag
+    api_username = session.get('username')
+    api_password = session.get('password')
+    print(api_username)
+    if not api_username:
+        session_flag =0
+        api_username,api_password = 0,0
+    return api_username,api_password
+
+
+
+
+@app.route('/TebotAPI/GetImage', methods=['POST'])
+def Tebot_getimage_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+
+    elif validation == True  and session_flag == True and user_login_counter:
+
+        camera_port_id = api_user_data['camera_port_id']
+        meter_id = api_user_data['meter_id']
+        randomString = api_user_data['generatedString']
+        if meter_type == 'GasMeter1':
+            return get_imageGM1(meter_id,camera_port_id,randomString)
+        elif meter_type == 'GasMeter2':
+            return get_imageGM2(meter_id, camera_port_id, randomString)
+        elif meter_type == 'EMeter1':
+            return get_imageEM1(meter_id, camera_port_id, randomString)
+        elif meter_type == 'EMeter2':
+            return get_imageEM2(meter_id, camera_port_id, randomString)
+        elif meter_type == 'ElsterGasMeter':
+            return get_imageEGM(meter_id, camera_port_id, randomString)
+        elif meter_type == 'ElsterEMeter':
+            return get_imageEEM(meter_id, camera_port_id, randomString)
+
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+@app.route('/TebotAPI/GasMeter/press', methods=['POST'])
+def Tebot_gasmeter_press_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    print(api_user_data)
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        print(api_username)
+        validation = user_validation(api_username, api_password)
+        #session_flag = True
+        #get_session_user_details()
+        print("valiadtion value"+str(validation))
+    else:
+        api_username, api_password = 0,0
+
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+
+    elif validation == True  and meter_type == 'GasMeter1' and session_flag == True and user_login_counter:
+        print("user validation done")
+        pin_number = api_user_data['pin_number']
+        press_type = api_user_data['press_type']
+        button_name = api_user_data['button_name']
+        if press_type == 'ShortPress':
+            if button_name == 'A':
+                return gasMeterShort1A(pin_number)
+            elif button_name == 'B':
+                return gasMeterShort1B(pin_number)
+        elif press_type == 'LongPress':
+            if button_name == 'A':
+                return gasMeterLong1A(pin_number)
+            elif button_name == 'B':
+                return gasMeterLong1B(pin_number)
+    elif validation == True  and meter_type == 'GasMeter2' and session_flag == True and user_login_counter:
+        pin_number = api_user_data['pin_number']
+        press_type = api_user_data['press_type']
+        button_name = api_user_data['button_name']
+        if press_type == 'ShortPress':
+            if button_name == 'A':
+                return gasMeterShort2A(pin_number)
+            elif button_name == 'B':
+                return gasMeterShort2B(pin_number)
+        elif press_type == 'LongPress':
+            if button_name == 'A':
+                return gasMeterLong2A(pin_number)
+            elif button_name == 'B':
+                return gasMeterLong2B(pin_number)
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+
+@app.route('/TebotAPI/EMeter/press', methods=['POST'])
+def Tebot_emeter_press_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+
+    elif validation == True  and meter_type == 'EMeter1' and session_flag == True and user_login_counter:
+        pin_number = api_user_data['pin_number']
+        press_type = api_user_data['press_type']
+        button_name = api_user_data['button_name']
+        if press_type == 'ShortPress':
+            if button_name == 'A':
+                return eMeterShort1A(pin_number)
+            elif button_name == 'B':
+                return eMeterShort1B(pin_number)
+        elif press_type == 'LongPress':
+            if button_name == 'A':
+                return eMeterLong1A(pin_number)
+            elif button_name == 'B':
+                return eMeterLong1B(pin_number)
+    elif validation == True  and meter_type == 'EMeter2' and session_flag == True and user_login_counter:
+        pin_number = api_user_data['pin_number']
+        press_type = api_user_data['press_type']
+        button_name = api_user_data['button_name']
+        if press_type == 'ShortPress':
+            if button_name == 'A':
+                return eMeterShort2A(pin_number)
+            elif button_name == 'B':
+                return eMeterShort2B(pin_number)
+        elif press_type == 'LongPress':
+            if button_name == 'A':
+                return eMeterLong2A(pin_number)
+            elif button_name == 'B':
+                return eMeterLong2B(pin_number)
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+@app.route('/TebotAPI/ElsterGasMeter/press', methods=['POST'])
+def Tebot_elstergasmeter_press_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    #meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    press_type = api_user_data['press_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+    elif validation == True  and press_type == 'ShortPress' and session_flag == True and user_login_counter:
+        pin_number = api_user_data['pin_number']
+        button_position = api_user_data['button_name']
+        if button_position == 'Left':
+            return  elstergasMeterShortLeft(pin_number)
+        elif button_position == 'Middle':
+            return  elstergasMeterShortMiddle(pin_number)
+        elif button_position == 'Right':
+            return  elstergasMeterShortRight(pin_number)
+    elif validation == True  and press_type == 'LongPress' and session_flag == True and user_login_counter:
+        pin_number = api_user_data['pin_number']
+        button_position = api_user_data['button_name']
+        if button_position == 'Left':
+            return  elstergasMeterLeft(pin_number)
+        elif button_position == 'Middle':
+            return  elstergasMeterLongMiddle(pin_number)
+        elif button_position == 'Right':
+            return elstergasMeterLongRight(pin_number)
+        else:
+            return "check the input"
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+
+@app.route('/TebotAPI/ElsterEMeter/press', methods=['POST'])
+def Tebot_elsterEmeter_press_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+
+    elif validation == True  and session_flag == True and user_login_counter:
+        pin_number = api_user_data['pin_number']
+        press_type = api_user_data['press_type']
+        button_name = api_user_data['button_name']
+        if press_type == 'ShortPress':
+            if button_name == 'A':
+                return elsterEMeterShortA(pin_number)
+            elif button_name == 'B':
+                return elsterEMeterShortB(pin_number)
+        elif press_type == 'LongPress':
+            if button_name == 'A':
+                return elsterEMeterLongA(pin_number)
+            elif button_name == 'B':
+                return elsterEMeterLongB(pin_number)
+
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+
+@app.route('/TebotAPI/GasMeter/EnterString', methods=['POST'])
+def Tebot_gasmeter_enterstring_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+    elif validation == True   and session_flag == True and user_login_counter:
+        pin_number = api_user_data['pin_number']
+        code_string = api_user_data['code']
+        if meter_type == 'GasMeter1':
+            return initiateStringGasMeter1(code_string,pin_number)
+        elif meter_type == 'GasMeter2':
+            return initiateStringGasMeter2(code_string, pin_number)
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+@app.route('/TebotAPI/EMeter/EnterString', methods=['POST'])
+def Tebot_emeter_enterstring_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+    elif validation == True and session_flag == True and user_login_counter:
+        pin_number_A = api_user_data['pin_number_A']
+        pin_number_B = api_user_data['pin_number_B']
+        code_string = api_user_data['code']
+        if meter_type == 'EMeter1':
+            return initiateStringEMeter1(code_string,pin_number_A,pin_number_B)
+        elif meter_type == 'EMeter2':
+            return initiateStringEMeter2(code_string, pin_number_A,pin_number_B)
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+@app.route('/TebotAPI/ElsterGasMeter/EnterString', methods=['POST'])
+def Tebot_elstergasmeter_enterstring_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+    elif validation == True and session_flag == True and user_login_counter:
+        pin_number_L = api_user_data['pin_number_L']
+        pin_number_M = api_user_data['pin_number_M']
+        code_string = api_user_data['code']
+        return initiateStringElsterGMeter(code_string,pin_number_L,pin_number_M)
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+@app.route('/TebotAPI/ElsterEMeter/EnterString', methods=['POST'])
+def Tebot_elsterEmeter_enterstring_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+    elif validation == True and session_flag == True and user_login_counter:
+        pin_number_A = api_user_data['pin_number_A']
+        pin_number_B = api_user_data['pin_number_B']
+        code_string = api_user_data['code']
+        return initiateStringElsterEMeter(code_string,pin_number_A,pin_number_B)
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+
+
+@app.route('/TebotAPI/EMeter/SimultaniousPress', methods=['POST'])
+def Tebot_emeter_pressAB_method():
+    global  session_flag, user_login_counter
+    api_user_data = request.get_json()
+    meter_type = api_user_data['meter_type']
+    request_type = api_user_data['request_type']
+    if request_type == 'internal' :
+        api_username = api_user_data['username']
+        api_password = api_user_data['password']
+        validation = user_validation(api_username, api_password)
+    else:
+        api_username, api_password = 0,0
+    if not api_username:
+        session['logged_in'] = False
+        session_flag = 0
+        return "Session Timed out Please login again or check the input details"
+    elif validation == True and session_flag == True and user_login_counter:
+        pin_number_A = api_user_data['pin_number_A']
+        pin_number_B = api_user_data['pin_number_B']
+        if meter_type == 'EMeter1':
+            return eMeterPress1AB(pin_number_A,pin_number_B)
+        elif meter_type == 'EMeter2':
+            return eMeterPress2AB(pin_number_A, pin_number_B)
+
+    elif not user_login_counter:
+        return " Account Locked due to Multiple Wrong Attempts! Restart the controller After 10mins"
+    else:
+        user_login_counter -=1
+        return "Invalid Access"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+######################..................SecureImplementation.............#################################################
+
+
+
+
+
+
+
+def setServoPulse(channel, pulse):
+  pulseLength = 1000000                   # 1,000,000 us per second
+  pulseLength /= 60                       # 60 Hz
+  print ("%d us per period" % pulseLength)
+  pulseLength /= 4096                     # 12 bits of resolution
+  print ("%d us per bit" % pulseLength)
+  pulse *= 1000
+  pulse /= pulseLength
+  pwm.setPWM(channel, 0, pulse)
+
+#pwm.setPWMFreq(60)                        # Set frequency to 60 Hz
+@app.route('/')
+def home():
+    return "<body style = 'color:crimson; font-size:30px; text-align:center; margin-top:200px'> Welcome To TEBOT Smart Meter Testing</body>"
+    #return "Welcome To TEBOT III and It is up and running"
+
+#function to capture image
+#meterType, meterID are necessary to create folder structure
+#randomString - since chrome loads image from cache, sending current time in milliseconds
+#os.system call has /dev/camera instead of /dev/video as we have written udev rules to fix camera 
+@app.route('/get_image/GasMeter1/<meterID>/<camera>/<randomString>')
+def get_imageGM1(meterID, camera, randomString):
+    GM1ImgFile = open(imageDirectory+'GM1Counter.pickle', 'rb')
+    GM1Counter  = pickle.load(GM1ImgFile)
+    picture = False
+    GM1ImgFile.close()	
+    if GM1Counter > 2000:
+              GM1Counter = 0
+              for file in os.listdir(imageDirectory):
+                  if fnmatch.fnmatch(file, 'GasMeter1*.jpg'):
+                     os.remove(imageDirectory+file)
+    #filename = imageDirectory + datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f") + ".jpg"
+    filename = imageDirectory + "GasMeter1_" + str(GM1Counter)  + ".jpg"
+    meterID = str(meterID)
+    for i in range(0,10):
+        os.system("sudo fswebcam -r 1280x720 --no-banner -S 2  --device /dev/camera" + camera + " "  + filename)
+        if os.path.exists(filename):
+            picture = True
+            GM1ImgFile = open(imageDirectory+'GM1Counter.pickle', 'wb')
+            GM1Counter += 1
+            #if GMCounter > 120:
+            #  GMCounter = 0
+	    #  for file in os.listdir(imageDirectory):
+            #      if fnmatch.fnmatch(file, 'GasMeter*.jpg'):
+            #         os.remove(imageDirectory+file)
+            pickle.dump(GM1Counter, GM1ImgFile) 	
+            GM1ImgFile.close()
+            break
+        time.sleep(1)
+    if picture:
+        #try:
+    	#   getcurrentss(filename, meterType, meterID)
+    	#except:
+    	#   print "Unexpected error", sys.exc_info()[0]
+    	return send_file(filename, mimetype='image/jpg')
+    else:
+        return "<body style = 'color:aqua; font-size:20px; text-align:center; margin-top:200px';>Please check if the Camera is connected and try again<body>"
+
+
+@app.route('/get_image/GasMeter2/<meterID>/<camera>/<randomString>')
+def get_imageGM2(meterID, camera, randomString):
+    GM2ImgFile = open(imageDirectory+'GM2Counter.pickle', 'rb')
+    GM2Counter  = pickle.load(GM2ImgFile)
+    picture = False
+    GM2ImgFile.close()
+    if GM2Counter > 2000:
+              GM2Counter = 0
+              for file in os.listdir(imageDirectory):
+                  if fnmatch.fnmatch(file, 'GasMeter2*.jpg'):
+                     os.remove(imageDirectory+file)
+    #filename = imageDirectory + datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f") + ".jpg"
+    filename = imageDirectory + "GasMeter2_" + str(GM2Counter)  + ".jpg"
+    meterID = str(meterID)
+    for i in range(0,10):
+        os.system("sudo fswebcam -r 1280x720 --no-banner -S 2  --device /dev/camera" + camera + " "  + filename)
+        if os.path.exists(filename):
+            picture = True
+            GM2ImgFile = open(imageDirectory+'GM2Counter.pickle', 'wb')
+            GM2Counter += 1
+            #if GMCounter > 120:
+            #  GMCounter = 0
+            #  for file in os.listdir(imageDirectory):
+            #      if fnmatch.fnmatch(file, 'GasMeter*.jpg'):
+            #         os.remove(imageDirectory+file)
+            pickle.dump(GM2Counter, GM2ImgFile)
+            GM2ImgFile.close()
+            break
+        time.sleep(1)
+    if picture:
+        #try:
+        #   getcurrentss(filename, meterType, meterID)
+        #except:
+        #   print "Unexpected error", sys.exc_info()[0]
+        return send_file(filename, mimetype='image/jpg')
+    else:
+        return "<body style = 'color:aqua; font-size:20px; text-align:center; margin-top:200px';>Please check if the Camera is connected and try again<body>"
+
+@app.route('/get_image/ElsterGasMeter/<meterID>/<camera>/<randomString>')
+def get_imageEGM(meterID, camera, randomString):
+    EGMImgFile = open(imageDirectory+'EGMCounter.pickle', 'rb')
+    EGMCounter  = pickle.load(EGMImgFile)
+    picture = False
+    EGMImgFile.close()
+    if EGMCounter > 2000:
+              EGMCounter = 0
+              for file in os.listdir(imageDirectory):
+                  if fnmatch.fnmatch(file, 'ElsterGasMeter*.jpg'):
+                     os.remove(imageDirectory+file)
+    #filename = imageDirectory + datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f") + ".jpg"
+    filename = imageDirectory + "ElsterGasMeter_" + str(EGMCounter)  + ".jpg"
+    meterID = str(meterID)
+    for i in range(0,10):
+        os.system("sudo fswebcam -r 1280x720 --no-banner -S 2  --device /dev/camera" + camera + " "  + filename)
+        if os.path.exists(filename):
+            picture = True
+            EGMImgFile = open(imageDirectory+'EGMCounter.pickle', 'wb')
+            EGMCounter += 1
+            #if GMCounter > 120:
+            #  GMCounter = 0
+            #  for file in os.listdir(imageDirectory):
+            #      if fnmatch.fnmatch(file, 'GasMeter*.jpg'):
+            #         os.remove(imageDirectory+file)
+            pickle.dump(EGMCounter, EGMImgFile)
+            EGMImgFile.close()
+            break
+        time.sleep(1)
+    if picture:
+        #try:
+        #   getcurrentss(filename, meterType, meterID)
+        #except:
+        #   print "Unexpected error", sys.exc_info()[0]
+        return send_file(filename, mimetype='image/jpg')
+    else:
+        return "<body style = 'color:aqua; font-size:20px; text-align:center; margin-top:200px';>Please check if the Camera is connected and try again<body>"
+
+
+
+
+@app.route('/get_image/EMeter1/<meterID>/<camera>/<randomString>')
+def get_imageEM1(meterID, camera, randomString):
+    EM1ImgFile = open(imageDirectory+'EM1Counter.pickle', 'rb')
+    EM1Counter  = pickle.load(EM1ImgFile)
+    picture = False
+    EM1ImgFile.close()
+    if EM1Counter > 2000:
+              EM1Counter = 0
+              for file in os.listdir(imageDirectory):
+                  if fnmatch.fnmatch(file, 'EMeter1*.jpg'):
+                     os.remove(imageDirectory+file)
+    #filename = imageDirectory + datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f") + ".jpg"
+    filename = imageDirectory + "EMeter1_" + str(EM1Counter)  + ".jpg"
+    meterID = str(meterID)
+    for i in range(0,10):
+        os.system("sudo fswebcam -r 1280x720 --no-banner -S 2  --device /dev/camera" + camera + " "  + filename)
+        if os.path.exists(filename):
+            picture = True
+            EM1ImgFile = open(imageDirectory+'EM1Counter.pickle', 'wb')
+            EM1Counter += 1
+            pickle.dump(EM1Counter, EM1ImgFile)
+            EM1ImgFile.close()
+            break
+        time.sleep(1)
+    if picture:
+        #try:
+        #   getcurrentss(filename, meterType, meterID)
+        #except:
+        #   print "Unexpected error", sys.exc_info()[0]
+        return send_file(filename, mimetype='image/jpg')
+    else:
+        return "<body style = 'color:aqua; font-size:20px; text-align:center; margin-top:200px';>Please check if the Camera is connected and try again<body>"
+
+
+@app.route('/get_image/EMeter2/<meterID>/<camera>/<randomString>')
+def get_imageEM2(meterID, camera, randomString):
+    EM2ImgFile = open(imageDirectory+'EM2Counter.pickle', 'rb')
+    EM2Counter  = pickle.load(EM2ImgFile)
+    picture = False
+    EM2ImgFile.close()
+    if EM2Counter > 2000:
+              EM2Counter = 0
+              for file in os.listdir(imageDirectory):
+                  if fnmatch.fnmatch(file, 'EMeter2*.jpg'):
+                     os.remove(imageDirectory+file)
+    #filename = imageDirectory + datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f") + ".jpg"
+    filename = imageDirectory + "EMeter2_" + str(EM2Counter)  + ".jpg"
+    meterID = str(meterID)
+    for i in range(0,10):
+        os.system("sudo fswebcam -r 1280x720 --no-banner -S 2  --device /dev/camera" + camera + " "  + filename)
+        if os.path.exists(filename):
+            picture = True
+            EM2ImgFile = open(imageDirectory+'EM2Counter.pickle', 'wb')
+            EM2Counter += 1
+            if EM2Counter > 2000:
+              EM2Counter = 0
+            pickle.dump(EM2Counter, EM2ImgFile)
+            EM2ImgFile.close()
+            break
+        time.sleep(1)
+    if picture:
+        #try:
+        #   getcurrentss(filename, meterType, meterID)
+        #except:
+        #   print "Unexpected error", sys.exc_info()[0]
+        return send_file(filename, mimetype='image/jpg')
+    else:
+        return "<body style = 'color:aqua; font-size:20px; text-align:center; margin-top:200px';>Please check if the Camera is connected and try again<body>"
+
+
+
+@app.route('/get_image/ElsterEMeter/<meterID>/<camera>/<randomString>')
+def get_imageEEM(meterID, camera, randomString):
+    EEMImgFile = open(imageDirectory+'EEMCounter.pickle', 'rb')
+    EEMCounter  = pickle.load(EEMImgFile)
+    picture = False
+    EEMImgFile.close()
+    if EEMCounter > 2000:
+              EEMCounter = 0
+              for file in os.listdir(imageDirectory):
+                  if fnmatch.fnmatch(file, 'EEMeter*.jpg'):
+                     os.remove(imageDirectory+file)
+    #filename = imageDirectory + datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f") + ".jpg"
+    filename = imageDirectory + "EEMeter_" + str(EEMCounter)  + ".jpg"
+    meterID = str(meterID)
+    for i in range(0,10):
+        os.system("sudo fswebcam -r 1280x720 --no-banner -S 2  --device /dev/camera" + camera + " "  + filename)
+        if os.path.exists(filename):
+            picture = True
+            EEMImgFile = open(imageDirectory+'EEMCounter.pickle', 'wb')
+            EEMCounter += 1
+            if EEMCounter > 2000:
+              EEMCounter = 0
+            pickle.dump(EEMCounter, EEMImgFile)
+            EEMImgFile.close()
+            break
+        time.sleep(1)
+    if picture:
+        #try:
+        #   getcurrentss(filename, meterType, meterID)
+        #except:
+        #   print "Unexpected error", sys.exc_info()[0]
+        return send_file(filename, mimetype='image/jpg')
+    else:
+        return "<body style = 'color:aqua; font-size:20px; text-align:center; margin-top:200px';>Please check if the Camera is connected and try again<body>"
+
+
+
+
+@app.route('/get_image2/<meterType>/<meterID>/<camera>/<randomString>')
+def get_image2(meterType, meterID, camera, randomString):
+    filename = imageDirectory + datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S_%f") + ".jpg"
+    meterType = str(meterType)
+    meterID = str(meterID)
+    for i in range(0,10):
+        os.system("sudo fswebcam -r 1280x720 --no-banner -S 2  --device /dev/camera" + camera + " "  + filename)
+        if os.path.exists(filename):
+            break
+        time.sleep(1)
+    #try:
+    #   getcurrentss(filename, meterType, meterID)
+    #except:
+    #   print "Unexpected error", sys.exc_info()[0]
+    return send_file(filename, mimetype='image/jpg')
+
+
+#for OCR - this is not implemented for now hence commenting the api call
+#@app.route('/getcode/')
+def code():
+  #this will capture image from the usb camera
+  #os.system("sudo fswebcam -r '920x544' /home/pi/image.jpg  -S 2")
+  #This will crop the captured image as per the specified dimensions
+    #img = cv2.imread("/home/pi/GasMeter.jpg")
+    #crop_img = img[250:400, 80:1025]
+    img = cv2.imread("/home/pi/C1.jpg")
+    crop_img = img[500:640, 300:1080]
+    cv2.imwrite('/home/pi/croped.png',crop_img)
+
+#This will process the images
+#img = cv2.imread('croped.png',0)
+#ret,thresh3 = cv2.threshold(img,127,255,cv2.THRESH_TRUNC)
+#cv2.imwrite('/home/pi/processed.png',thresh3)
+
+    image = cv2.imread('/home/pi/croped.png')
+    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    cv2.imwrite('/home/pi/gray_image.png',gray_image)
+
+    blur = cv2.GaussianBlur(gray_image,(5,5),0)
+    cv2.imwrite('/home/pi/blur_image1.png',blur)
+
+    kernel = np.ones((8,8), np.uint8)
+    img_erosion = cv2.erode(blur, kernel, iterations=1)
+    cv2.imwrite('/home/pi/processed.png',img_erosion)
+
+    ret,thresh4 = cv2.threshold(img_erosion,200,255,cv2.THRESH_TOZERO)
+    cv2.imwrite('/home/pi/blur_image.png',thresh4)
+
+#This will return the ocr from the processed image
+    os.system("tesseract /home/pi/processed.png stdout --tessdata-dir /usr/share/tesseract-ocr/tessdata/ -l matrix> /home/pi/output1.txt")
+    with open('/home/pi/output1.txt', 'r') as f:
+       first_line = f.readline()
+       #print first_line
+       print (first_line.replace(" ", ""))
+    return first_line.replace(" ", "")
+    return "Done"
+
+#It sends screenshot taken to sharepoint
+#The ip address of sharepoint has to be set here inside the function as host
+@app.route('/sendToSharePoint/<filename>/<meterType>/<meterID>')
+def getcurrentss(filename, meterType, meterID):
+    s = socket.socket()         # Create a socket object
+    s.settimeout(3)
+    host = '10.120.103.80'      #socket.gethostname() # Get local machine name
+    port = 4444                 # Reserve a port for your service.
+    s.connect((host, port))
+    print(meterID)
+    a = meterType+"/"+meterID+"/"+str(datetime.date.today())+"/".rstrip()
+    b = a.encode('utf-8')    
+    s.send(b)
+    f = open(filename,'rb')
+    print ('Sending...')
+    l = f.read(1024)
+    while (l):
+        s.send(l)
+        l = f.read(1024)
+    f.close()
+    print ("Done Sending")
+    s.shutdown(socket.SHUT_WR)
+    print (s.recv(1024))
+    s.close                     # Close the socket when done
+    return "Captured Current Screen of GMeter"
+
+#function to calibrate motors for ideal and press button action
+@app.route('/pwmVal/<int:PinNumber>/<int:pwmsig>')
+def pwmVal(PinNumber, pwmsig):
+    #pwm.setPWM(PinNumber, 0, pwmsig)
+    return"PWM signal sent"
+
+
+@app.route('/pickle/initialize')
+def pickleInitialize():
+     #pwm.setPWM(PinNumber, 0, pwmsig)
+     GM1Counter = 0
+     GM1ImgFile = open(imageDirectory+'GM1Counter.pickle', 'wb')
+     pickle.dump(GM1Counter, GM1ImgFile)
+     GM1ImgFile.close()
+
+     GM2Counter = 0
+     GM2ImgFile = open(imageDirectory+'GM2Counter.pickle', 'wb')
+     pickle.dump(GM2Counter, GM2ImgFile)
+     GM2ImgFile.close()
+
+     EGMCounter = 0
+     EGMImgFile = open(imageDirectory+'EGMCounter.pickle', 'wb')
+     pickle.dump(EGMCounter, EGMImgFile)
+     EGMImgFile.close()
+
+
+     EM1Counter = 0
+     EM1ImgFile = open(imageDirectory+'EM1Counter.pickle', 'wb')
+     pickle.dump(EM1Counter, EM1ImgFile)
+     EM1ImgFile.close()
+
+     EM2Counter = 0
+     EM2ImgFile = open(imageDirectory+'EM2Counter.pickle', 'wb')
+     pickle.dump(EM2Counter, EM2ImgFile)
+     EM2ImgFile.close()
+
+     EEMCounter = 0
+     EEMImgFile = open(imageDirectory+'EEMCounter.pickle', 'wb')
+     pickle.dump(EEMCounter, EEMImgFile)
+     EEMImgFile.close()
+     return"PWM signal sent"
+
+
+
+
+
+#GasMeter Actions - Ideal Position, Press Button A, Press Button B
+@app.route('/IdealGasMeter1/<PinNumber>')
+def idealGasMeter1(PinNumber):
+     #if PinNumber in range(0,16):
+     os.system("echo "+PinNumber+"=32% > /dev/servoblaster")
+     time.sleep(1)
+     return"The tapper of GasMeter1 is in position"
+
+@app.route('/GasMeter1A/<PinNumber>')
+def gasMeter1A(PinNumber):
+     os.system("echo "+PinNumber+"=38% > /dev/servoblaster")
+     return"Button A of GasMeter1 is Tapped"
+
+@app.route('/GasMeter1B/<PinNumber>')
+def gasMeter1B(PinNumber):
+     os.system("echo "+PinNumber+"= 23% > /dev/servoblaster")
+     return"Button B of GasMeter1 is Tapped"
+
+@app.route('/IdealGasMeter2/<PinNumber>')
+def idealGasMeter2(PinNumber):
+     os.system("echo "+PinNumber+"=29% > /dev/servoblaster")
+     time.sleep(1)
+     return"The tapper of GasMeter2 is in position"
+
+@app.route('/GasMeter2A/<PinNumber>')
+def gasMeter2A(PinNumber):
+     os.system("echo "+PinNumber+"=38% > /dev/servoblaster")
+     return"Button A of GasMeter2 is Tapped"
+
+@app.route('/GasMeter2B/<PinNumber>')
+def gasMeter2B(PinNumber):
+     os.system("echo "+PinNumber+"= 24% > /dev/servoblaster")
+     return"Button B of GasMeter2 is Tapped"
+
+#Elster Gas Meters
+@app.route('/ElsterIdealGasMeterRight/<PinNumber>')
+def elsteridealGasMeterRight(PinNumber):
+     os.system("echo "+PinNumber+"=10% > /dev/servoblaster")
+     time.sleep(1)
+     return"The tapper of GasMeter1 is in position"
+
+
+@app.route('/ElsterIdealGasMeterMiddle/<PinNumber>')
+def elsteridealGasMeterMiddle(PinNumber):
+     os.system("echo "+PinNumber+"=5% > /dev/servoblaster")
+     time.sleep(1)
+     return"The tapper of GasMeter1 is in position"
+
+
+@app.route('/ElsterGasMeterMiddle/<PinNumber>')
+def elstergasMeterMiddle(PinNumber):
+     os.system("echo "+PinNumber+"=0% > /dev/servoblaster")
+     return"Button A of GasMeter1 is Tapped"
+
+@app.route('/ElsterGasMeterRight/<PinNumber>')
+def elstergasMeterRight(PinNumber):
+     os.system("echo "+PinNumber+"=7% > /dev/servoblaster")
+     return"Button B of GasMeter1 is Tapped"
+
+
+@app.route('/ElsterGasMeterLeftIdeal/<PinNumber>')
+def elstergasMeterIdealLeft(PinNumber):
+     os.system("echo "+PinNumber+"= 40% > /dev/servoblaster")
+     return"Ideal Position Left Elster Gas Meter"
+
+
+@app.route('/ElsterGasMeterLeft/<PinNumber>')
+def elstergasMeterLeft(PinNumber):
+     os.system("echo "+PinNumber+"= 45% > /dev/servoblaster")
+     return"Left Button of ElsterGasMeter is Tapped"
+
+#ElsterGasMeter Button(A,B)- ShortPress & LongPress Action
+@app.route('/ElsterGasMeter/ShortPress/Left/<PinNumber>')
+def elstergasMeterShortLeft(PinNumber):
+    elstergasMeterLeft(PinNumber)
+    time.sleep(1)
+    elstergasMeterIdealLeft(PinNumber)
+    return "ElsterGasMeter Button left is short pressed"
+
+@app.route('/ElsterGasMeter/ShortPress/Middle/<PinNumber>')
+def elstergasMeterShortMiddle(PinNumber):
+    elstergasMeterMiddle(PinNumber)
+    time.sleep(1)
+    elsteridealGasMeterMiddle(PinNumber)
+    return "ElsterGasMeter Middle Button  is short pressed"
+
+@app.route('/ElsterGasMeter/LongPress/Middle/<PinNumber>')
+def elstergasMeterLongMiddle(PinNumber):
+    elstergasMeterMiddle(PinNumber)
+    time.sleep(7)
+    elsteridealGasMeterMiddle(PinNumber)
+    return "ElsterGasMeter Middle Button  is long pressed"
+
+def elstergasMeterLongLeft(PinNumber):
+    elstergasMeterLeft(PinNumber)
+    time.sleep(7)
+    elstergasMeterIdealLeft(PinNumber)
+    return "ElsterGasMeter Left Button  is long pressed"
+
+@app.route('/ElsterGasMeter/ShortPress/Right/<PinNumber>')
+def elstergasMeterShortRight(PinNumber):
+    elstergasMeterRight(PinNumber)
+    time.sleep(1)
+    elsteridealGasMeterRight(PinNumber)
+    return "ElsterGasMeter Button Right is short pressed"
+
+def elstergasMeterLongRight(PinNumber):
+    elstergasMeterRight(PinNumber)
+    time.sleep(7)
+    elsteridealGasMeterRight(PinNumber)
+    return "ElsterGasMeter Button Right is Long pressed"
+
+#EMeter(A,B) Actions - Ideal, Press Button A, Press Button B
+@app.route('/IdealEMeter1A/<PinNumber>')
+def idealEMeter1A(PinNumber):
+     #if PinNumber in range(0,16):
+     os.system("echo "+PinNumber+"= 55% > /dev/servoblaster")
+     #pwm.setPWM(PinNumber, 0, 480)
+     time.sleep(1)
+     return "Tapper1 A  is in Ideal position"
+
+
+def idealEMeter1AB(PinA, PinB):
+     os.system("echo "+PinA+"= 62% > /dev/servoblaster")
+     os.system("echo "+PinB+"= 15% > /dev/servoblaster")
+     #pwm.setPWM(PinA, 0, 480)
+     #pwm.setPWM(PinB, 0, 210)
+     return "Tapper1 A  is in Ideal position"
+
+
+app.route('/IdealEMeter2A/<PinNumber>')
+def idealEMeter2A(PinNumber):
+     #if PinNumber in range(0,16):
+     os.system("echo "+PinNumber+"= 60% > /dev/servoblaster")
+     #pwm.setPWM(PinNumber, 0, 465)
+     time.sleep(1)
+     return"Tapper2 A is in Ideal position"
+
+
+@app.route('/IdealEMeter1B/<PinNumber>')
+def idealEMeter1B(PinNumber):
+     #if PinNumber in range(0,16):
+     os.system("echo "+PinNumber+"= 15% > /dev/servoblaster")
+     #pwm.setPWM(PinNumber, 0, 210)
+     time.sleep(1)
+     return"Tapper1 B is in Ideal position"
+
+@app.route('/IdealEMeter2B/<PinNumber>')
+def idealEMeter2B(PinNumber):
+     #if PinNumber in range(0,16):
+     os.system("echo "+PinNumber+"= 19% > /dev/servoblaster")  	   
+     #pwm.setPWM(PinNumber, 0, 245)
+     time.sleep(1)
+     return "Tapper2 B is in Ideal position"
+
+def idealEMeter2AB(PinA, PinB):
+     os.system("echo "+PinA+"= 60% > /dev/servoblaster")
+     os.system("echo "+PinB+"= 19% > /dev/servoblaster")
+     #pwm.setPWM(PinA, 0, 465)
+     #pwm.setPWM(PinB, 0, 245)
+     return "Tapper1 A  is in Ideal position"
+
+@app.route('/EMeter1A/<PinNumber>')
+def eMeter1A(PinNumber):
+     #if PinNumber in range(0,16):  
+     os.system("echo "+PinNumber+"= 70% > /dev/servoblaster")
+     #pwm.setPWM(PinNumber, 0, 510)
+     return"Button 1A of E-Meter is Tapped"
+
+@app.route('/EMeter2A/<PinNumber>')
+def eMeter2A(PinNumber):
+     #if PinNumber in range(0,16):
+     os.system("echo "+PinNumber+"= 68% > /dev/servoblaster") 
+     #pwm.setPWM(PinNumber, 0, 495)
+     return"Button 2A of E-Meter is Tapped"
+
+@app.route('/EMeter1B/<PinNumber>')
+def eMeter1B(PinNumber):
+    #if PinNumber in range(0,16):
+    os.system("echo "+PinNumber+"= 8% > /dev/servoblaster")
+    #pwm.setPWM(PinNumber, 0, 170)
+    return"Button 1B of E-Meter is Tapped"
+
+@app.route('/EMeter2B/<PinNumber>')
+def eMeter2B(PinNumber):
+    #if PinNumber in range(0,16):
+    os.system("echo "+PinNumber+"= 4% > /dev/servoblaster")
+    #pwm.setPWM(PinNumber, 0, 210)
+    return"Button 2B of E-Meter is Tapped"
+
+
+
+
+
+#GasMeter Button(A,B)- ShortPress & LongPress Action
+@app.route('/GasMeter1/ShortPress/A/<PinNumber>')
+def gasMeterShort1A(PinNumber):
+    gasMeter1A(PinNumber)
+    time.sleep(1)
+    idealGasMeter1(PinNumber)
+    return "GasMeter1 Button A is short pressed"
+
+@app.route('/GasMeter1/ShortPress/B/<PinNumber>')
+def gasMeterShort1B(PinNumber):
+    gasMeter1B(PinNumber)
+    time.sleep(1)
+    idealGasMeter1(PinNumber)
+    return "GasMeter1 Button B is short pressed"
+
+@app.route('/GasMeter1/LongPress/A/<PinNumber>')
+def gasMeterLong1A(PinNumber):
+    gasMeter1A(PinNumber)
+    time.sleep(7)
+    idealGasMeter1(PinNumber)
+    return "GasMeter1 Button A is long pressed"
+
+@app.route('/GasMeter1/LongPress/B/<PinNumber>')
+def gasMeterLong1B(PinNumber):
+    gasMeter1B(PinNumber)
+    time.sleep(7)
+    idealGasMeter1(PinNumber)
+    return "GasMeter1 Button B is long pressed"
+
+
+@app.route('/GasMeter2/ShortPress/A/<PinNumber>')
+def gasMeterShort2A(PinNumber):
+    gasMeter2A(PinNumber)
+    time.sleep(1)
+    idealGasMeter2(PinNumber)
+    return "GasMeter2 Button A is short pressed"
+
+@app.route('/GasMeter2/ShortPress/B/<PinNumber>')
+def gasMeterShort2B(PinNumber):
+    gasMeter2B(PinNumber)
+    time.sleep(1)
+    idealGasMeter2(PinNumber)
+    return "GasMeter2 Button B is short pressed"
+
+@app.route('/GasMeter2/LongPress/A/<PinNumber>')
+def gasMeterLong2A(PinNumber):
+    gasMeter2A(PinNumber)
+    time.sleep(7)
+    idealGasMeter2(PinNumber)
+    return "GasMeter2 Button A is long pressed"
+
+@app.route('/GasMeter2/LongPress/B/<PinNumber>')
+def gasMeterLong2B(PinNumber):
+    gasMeter2B(PinNumber)
+    time.sleep(7)
+    idealGasMeter2(PinNumber)
+    return "GasMeter2 Button B is long pressed"
+
+#E_Meter Button(A,B) - ShortPress, LongPress & Press A & B Simultaneously action
+@app.route('/EMeter1/ShortPress/A/<PinNumber>')
+def eMeterShort1A(PinNumber):
+    eMeter1A(PinNumber)
+    time.sleep(1)
+    idealEMeter1A(PinNumber)
+    return "EMeter1 Button A is short pressed"
+
+@app.route('/EMeter1/ShortPress/B/<PinNumber>')
+def eMeterShort1B(PinNumber):
+    eMeter1B(PinNumber)
+    time.sleep(1)
+    idealEMeter1B(PinNumber)
+    return "EMeter1 Button B is short pressed"
+
+@app.route('/EMeter1/LongPress/A/<PinNumber>')
+def eMeterLong1A(PinNumber):
+    eMeter1A(PinNumber)
+    time.sleep(3)
+    idealEMeter1A(PinNumber)
+    return "EMeter1 Button A is long pressed"
+
+@app.route('/EMeter1/LongPress/B/<PinNumber>')
+def eMeterLong1B(PinNumber):
+    eMeter1B(PinNumber)
+    time.sleep(3)
+    idealEMeter1B(PinNumber)
+    return "EMeter1 Button B is long pressed"					
+
+@app.route('/EMeter1/PressAB/<PinA>/<PinB>')
+def eMeterPress1AB(PinA, PinB):
+    eMeter1A(PinA)
+    eMeter1B(PinB)
+    time.sleep(7)
+    idealEMeter1AB(PinA, PinB)
+    return "Emeter1 Button A & B is simultaneously long pressed"
+
+@app.route('/EMeter2/ShortPress/A/<PinNumber>')
+def eMeterShort2A(PinNumber):
+    eMeter2A(PinNumber)
+    time.sleep(1)
+    idealEMeter2A(PinNumber)
+    return "EMeter2 Button A is short pressed"
+
+@app.route('/EMeter2/ShortPress/B/<PinNumber>')
+def eMeterShort2B(PinNumber):
+    eMeter2B(PinNumber)
+    time.sleep(1)
+    idealEMeter2B(PinNumber)
+    return "EMeter2 Button B is short pressed"
+
+@app.route('/EMeter2/LongPress/A/<PinNumber>')
+def eMeterLong2A(PinNumber):
+    eMeter2A(PinNumber)
+    time.sleep(7)
+    idealEMeter2A(PinNumber)
+    return "EMeter2 Button A is long pressed"
+
+@app.route('/EMeter2/LongPress/B/<PinNumber>')
+def eMeterLong2B(PinNumber):
+    eMeter2B(PinNumber)
+    time.sleep(7)
+    idealEMeter2B(PinNumber)
+    return "EMeter2 Button B is long pressed"
+
+@app.route('/EMeter2/PressAB/<PinA>/<PinB>')
+def eMeterPress2AB(PinA, PinB):
+    eMeter2A(PinA)
+    eMeter2B(PinB)
+    time.sleep(7)
+    idealEMeter2AB(PinA, PinB)
+    return "EMeter2 Button A & B is long pressed"
+
+
+#ElsterEmeter buttons
+@app.route('/IdealElsterEMeterA/<PinNumber>')
+def idealElsterEMeterA(PinNumber):
+     os.system("echo "+PinNumber+"= 62% > /dev/servoblaster")
+     time.sleep(1)
+     return "Tapper A  is in Ideal position"
+
+app.route('/IdealElsterEMeterB/<PinNumber>')
+def idealElsterEMeterB(PinNumber):
+     os.system("echo "+PinNumber+"= 60% > /dev/servoblaster")
+     time.sleep(1)
+     return"Tapper B is in Ideal position"
+
+@app.route('/ElsterEMeterA/<PinNumber>')
+def elsterEMeterA(PinNumber):
+     os.system("echo "+PinNumber+"= 70% > /dev/servoblaster")
+     return"Button 1A of E-Meter is Tapped"
+
+
+@app.route('/ElsterEMeterB/<PinNumber>')
+def elsterEMeterB(PinNumber):
+    os.system("echo "+PinNumber+"= 8% > /dev/servoblaster")
+    return"Button 1B of E-Meter is Tapped"
+
+
+
+
+#ShortPress LongPress and vendcode for elster emeter
+@app.route('/ElsterEMeter/ShortPress/A/<PinNumber>')
+def elsterEMeterShortA(PinNumber):
+    elsterEMeterA(PinNumber)
+    time.sleep(1)
+    idealElsterEMeterA(PinNumber)
+    return "ElsterEMeter Button A is short pressed"
+
+@app.route('/ElsterEMeter/ShortPress/B/<PinNumber>')
+def elsterEMeterShortB(PinNumber):
+    elsterEMeterB(PinNumber)
+    time.sleep(1)
+    idealElsterEMeterB(PinNumber)
+    return "ElsterEMeter Button B is short pressed"
+
+@app.route('/ElsterEMeter/LongPress/A/<PinNumber>')
+def elsterEMeterLongA(PinNumber):
+    elsterEMeterA(PinNumber)
+    time.sleep(7)
+    idealElsterEMeterA(PinNumber)
+    return "ElsterEMeter Button A is long pressed"
+
+@app.route('/ElsterEMeter/LongPress/B/<PinNumber>')
+def elsterEMeterLongB(PinNumber):
+    elsterEMeterB(PinNumber)
+    time.sleep(7)
+    idealElsterEMeterB(PinNumber)
+    return "ElsterEMeter Button B is long pressed"
+
+
+
+def getStringValue(passCh):
+    switcher = {
+        "0": 0,
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "4": 4,
+        "5": 5,
+        "6": 6,
+        "7": 7,
+        "8": 8,
+        "9": 9,
+        "A": 10,
+        "B": 11,
+        "C": 12,
+        "D": 13,
+        "E": 14,
+        "F": 15,
+        "G": 16,
+        "H": 17,
+        "I": 18,
+        "J": 19,
+        "K": 20,
+        "L": 21,
+        "M": 22,
+        "N": 23,
+        "O": 24,
+        "P": 25,
+        "Q": 26,
+        "R": 27,
+        "S": 28,
+        "T": 29,
+        "U": 30,
+        "V": 31,
+        "W": 32,
+        "X": 33,
+        "Y": 34,
+        "Z": 35
+        }
+    passVal = switcher[passCh]
+    #func = (a[0])
+    #func(a[1], meterType, pin)
+    return passVal
+
+def enterStringGasMeter1(passVal, pinNumber):
+    i = 0
+    while i<=passVal:
+        #print(passVal, pinNumber)
+        gasMeterShort1A(pinNumber)
+        i+=1
+    gasMeterShort1B(pinNumber)
+    return "<script>alert('The character has been entered in GasMeter1')</script>"
+
+def enterStringGasMeter2(passVal, pinNumber):
+    i = 0
+    while i<=passVal:
+        #print(passVal, pinNumber)
+        gasMeterShort2A(pinNumber)
+        i+=1
+    gasMeterShort2B(pinNumber)
+    return "<script>alert('The character has been entered in GasMeter2')</script>"
+
+
+def enterStringElsterGMeter(passVal, pinL, pinM):
+    i = 0
+    while i<=passVal:
+        #print(passVal, pinA, pinB)
+        elstergasMeterShortLeft(pinL)
+        i+=1
+    elstergasMeterShortMiddle(pinM)
+    return "The character has been entered in EMeter"
+
+
+def enterStringEMeter1(passVal, pinA, pinB):
+    i = 0
+    while i<=passVal:
+        #print(passVal, pinA, pinB)
+        eMeterShort1A(pinA)
+        i+=1
+    eMeterShort1B(pinB)
+    return "The character has been entered in EMeter"
+
+def enterStringEMeter2(passVal, pinA, pinB):
+    i = 0
+    while i<=passVal:
+        #print(passVal, pinA, pinB)
+        eMeterShort2A(pinA)
+        i+=1
+    eMeterShort2B(pinB)
+    return "The character has been entered in EMeter"
+
+
+def enterStringElsterEMeter(passVal, pinA, pinB):
+    i = 0
+    while i<=passVal:
+        #print(passVal, pinA, pinB)
+        elsterEMeterShortA(pinA)
+        i+=1
+    elsterEMeterShortB(pinB)
+    return "The character has been entered in elster EMeter"
+
+
+@app.route('/enterString/GasMeter1/<passCh>/<pinNumber>')
+def initiateStringGasMeter1(passCh, pinNumber):
+    for i in passCh:
+      passVal = getStringValue(i)
+      enterStringGasMeter1(passVal, pinNumber)
+    return "The input character for GasMeter1 is entered"
+
+@app.route('/enterString/GasMeter2/<passCh>/<pinNumber>')
+def initiateStringGasMeter2(passCh, pinNumber):
+    for i in passCh:
+      passVal = getStringValue(i)
+      enterStringGasMeter2(passVal, pinNumber)
+    return "The input character for GasMeter2 is entered"
+
+
+@app.route('/enterString/EMeter1/<passCh>/<pinA>/<pinB>')
+def initiateStringEMeter1(passCh, pinA, pinB):
+    for i in passCh:
+      passVal = getStringValue(i)
+      enterStringEMeter1(passVal, pinA, pinB)
+    return "The input character for EMeter model 1 is entered"
+
+@app.route('/enterString/EMeter2/<passCh>/<pinA>/<pinB>')
+def initiateStringEMeter2(passCh, pinA, pinB):
+    for i in passCh:
+      passVal = getStringValue(i)
+      enterStringEMeter2(passVal, pinA, pinB)
+    return "The input character for EMeter model 2 is entered"
+
+@app.route('/enterString/ElsterGasMeter/<passCh>/<pinL>/<pinM>')
+def initiateStringElsterGMeter(passCh, pinL, pinM):
+    for i in passCh:
+      passVal = getStringValue(i)
+      enterStringElsterGMeter(passVal, pinL, pinM)
+    return "The input character for Elster GasMeter is entered"
+
+@app.route('/enterString/ElsterEMeter/<passCh>/<pinA>/<pinB>')
+def initiateStringElsterEMeter(passCh, pinA, pinB):
+    for i in passCh:
+      passVal = getStringValue(i)
+      enterStringElsterEMeter(passVal, pinA, pinB)
+    return "The input character for ElsterEMeter is entered"
+
+
+#Function to retrieve the size of images from folder
+#raspberry pi was tested to hold 2.5GB after which it affects the performance and new screenshot couldn't be saved
+@app.route('/checkSpace/')
+def checkSpace():
+    total_size = 0
+    for dirpath, dirnames, filenames in os.walk(imageDirectory):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            total_size += os.path.getsize(fp)
+    sizeInMB = total_size/(1024.0*1024.0)
+    percent = (sizeInMB/2500)*100
+    #return str(total_size)+"bytes/"+ str(round(sizeInGB, 3)) + "GB"
+    return str(round(percent,2))	
+
+#This will delete all the images stored in image folder
+@app.route('/deleteImages/')
+def deleteImages():
+    for file in os.listdir(imageDirectory):
+        #if file.endswith('GasMeter*.jpg'):
+        if fnmatch.fnmatch(file, 'GasMeter*.jpg'):
+            #print(file)
+            os.remove(imageDirectory+file)
+            return "files deleted"
+		
+
+#This function is to return the image count
+@app.route('/ImageCount/')
+def countImages():
+    path, dirs, files = os.walk(imageDirectory).next()
+    file_count = len(files)
+    return str(file_count)
+	
+if __name__ == "__main__":
+    app.secret_key = os.urandom(24)
+    #app.run(host='0.0.0.0', port=80, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=443, debug=True, ssl_context= ('/home/pi/cert.pem', '/home/pi/key.pem'), threaded = True)
