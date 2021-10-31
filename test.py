@@ -3,6 +3,7 @@ import sys
 import glob
 import serial
 def serial_ports():
+    count=0
     """ Lists serial port names
 
         :raises EnvironmentError:
@@ -28,6 +29,7 @@ def serial_ports():
             s = serial.Serial(port)
             s.close()
             print("Successfully Found Serial Port\n")
+            print(count)
             result.append(port)
         except serial.SerialException as e:
             if e.errno == 13:
