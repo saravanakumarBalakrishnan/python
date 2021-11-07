@@ -28,7 +28,7 @@ def serial_ports():
         try:
             s = serial.Serial(port)
             s.close()
-            print("Successfully Found Serial Port\n")
+            print("Successfully Found Serial Port in the device \n")
             print(count)
             result.append(port)
         except serial.SerialException as e:
